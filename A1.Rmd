@@ -1,0 +1,263 @@
+---
+title: "Assignment #1 - Data set selection and initial Processing"
+author: "Xinyi Zhang"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r message = F,warning = F}
+#Loading packages
+if (!requireNamespace("BiocManager", quietly = TRUE))
+install.packages("BiocManager");library(BiocManager)
+if (!requireNamespace("GEOmetadb", quietly = TRUE))
+BiocManager::install("GEOmetadb");library(GEOmetadb)
+#Loading packages
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse,gridExtra,knitr,
+               kableExtra,sjPlot,reshape2,readr)
+## setting options
+knitr::opts_chunk$set(message = F,warning = F)
+```
+
+## Getting Data and connecting data to Geo Data
+
+```{r}
+## Geeting meta data
+if(!file.exists('GEOmetadb.sqlite')) getSQLiteFile()
+## Connecting data
+conect_data <- dbConnect(SQLite(),'GEOmetadb.sqlite')
+```
+
+```{r}
+## Getting RNA-Seq Data
+sql <- paste("SELECT DISTINCT gse.title,gse.gse, gpl.title,",
+             " gse.submission_date",
+             "FROM",
+             " gse JOIN gse_gpl ON gse_gpl.gse=gse.gse",
+             " JOIN gpl ON gse_gpl.gpl=gpl.gpl",
+             "WHERE",
+             " gse.submission_date > '2015-01-01' AND",
+             " gse.title LIKE '%SARS-CoV-2%' AND ",
+             " gpl.organism LIKE '%Homo sapiens%' AND",
+             " gpl.technology LIKE '%high-throughput seq%' ",sep=" ")
+## Data file
+rna_seq <- dbGetQuery(conect_data,sql);rna_seq
+```
+
+The data is extracted from the tile `Alveolitis in severe SARS-CoV-2 pneumonia is driven by self-sustaining circuits between infected alveolar macrophages and T cells`, with GSE code of `GSE155249`. The dataset is associated with following article.
+[https://pubmed.ncbi.nlm.nih.gov/34013276/]
+
+## Description of data
+
+They compared BAL samples from 86 patients with respiratory failure caused by severe SARS-CoV-2 pneumonia to BAL specimens from 252 patients with pneumonia caused by other infections and intubated patients without pneumonia, which were collected prospectively before and throughout the pandemic. They got samples from numerous patients within 48 hours of intubation and sequentially throughout their illness, which allowed us to learn more about the early aetiology of COVID-19-induced acute respiratory distress syndrome (ARDS).  Multicolor flow cytometry was used to identify CD4+ and CD8+ T cells, monocytes, mature and immature alveolar macrophages, and neutrophils in BAL samples. In a subset of patients with confirmed COVID-19, we also did bulk transcriptome profiling of flow cytometry-sorted alveolar macrophages. In addition, they used single cell RNA-Seq on BAL fluid from 5 patients with severe SARS-CoV-2 pneumonia who were intubated less than 48 hours after infection. 
+
+
+## Geo description of dataset
+
+The Geo description of this data set is given below.
+
+```{r}
+gse <- getGEO("GSE155249",GSEMatrix=FALSE)
+tab_df(data.frame(head(Meta(gse))), title = "Geo description of dataset")
+```
+
+## Information about platform
+
+```{r}
+current_gpl <- names(GPLList(gse))[1]
+current_gpl_info <- Meta(getGEO(current_gpl))
+## Title
+current_gpl_info$title
+## Submission date
+current_gpl_info$submission_date
+## Last update
+current_gpl_info$last_update_date
+## orgnism
+current_gpl_info$organism
+
+Platform <- tibble(`Information`=c("Platform title",
+                        "Submission data",
+                        "Last update data",
+                        "Organims",
+                        "Number of GEO datasets that use this techology",
+                        "Number of GEO samples that use this technology"),
+                       `Description` = c(current_gpl_info$title,
+                              current_gpl_info$submission_date,
+                              current_gpl_info$last_update_date,
+                              current_gpl_info$organism,
+                              length(current_gpl_info$series_id),
+                              length(current_gpl_info$sample_id)));
+# Print table
+tab_df(Platform, title = "Table: Information about platform")
+```
+
+
+## Getting Selected Expression data
+
+Here is the function that will download the data, and only download when there its not exist, other wise only load it from the file.
+
+```{r}
+## Function
+get_raw <- function (gse_names, data_dir = getwd()) {
+
+    for (gse_name in gse_names) {
+
+        gse_dir <- file.path(data_dir, gse_name)
+        work_dir  <- getwd()
+
+        # get raw data
+        if (!file.exists(gse_dir)) {
+            crossmeta:::getGEOSuppFiles(gse_name, baseDir = data_dir)
+        }
+
+        # untar
+        tar_names <- list.files(gse_dir, pattern = "\\.tar$", full.names = TRUE)
+        if (length(tar_names) > 0) {
+            res <- 1; try <- 0
+            while (res != 0 & try != 3) {
+                res <- try(utils::untar(tar_names,  exdir=gse_dir))
+                if (res != 0) Sys.sleep(10); try <- try + 1
+            }
+        }
+        # unzip
+        paths <- list.files(gse_dir, pattern = "\\.gz$",
+                            full.names = TRUE, ignore.case = TRUE)
+        sapply(paths, GEOquery::gunzip, overwrite = TRUE)
+    }
+}
+```
+
+
+```{r}
+# get raw data
+get_raw('GSE155249')
+# there is only one supplemental file
+supplement_data = read_csv("GSE155249/GSE155249_supplement-metadata.csv")
+tab_df(head(supplement_data),title="Table: Overview of the expression data")
+```
+
+## Cleaning the data
+
+FOr cleaning data, we will mainly explore the following points.
+
+1. How many unique genes do we have?
+2. Are there any non-genes in our dataset? If so what are they?
+3. Can we exclude them?
+
+## Checking the number of genes in data file
+
+```{r}
+dim(supplement_data)
+```
+It can be observed that there are 105715 genes, and 15 columns.
+
+## CHecking the names of all columns in data
+
+How can we retrieve the information that belongs to each sample given the absence of definition in format? 
+
+```{r}
+## Checking column names
+colnames(supplement_data)
+
+## Renaming the ID
+names(supplement_data)[1] <- "Genes_ID"
+```
+
+## Checking the duplicated genes
+
+```{r}
+summarized_gene_counts <- sort(table(supplement_data$Genes_ID),
+                               decreasing = TRUE)
+
+kable(summarized_gene_counts[which(summarized_gene_counts>1)[1:10]],format = "html")
+```
+
+
+It shows that there is no duplicate genes ID in the data, and there is no need to remove any of the row from data.
+
+## Checking missing values in data
+
+```{r}
+sum(is.na(supplement_data))
+```
+There is no missing value in the data.
+
+## Checking outliers in numeric variable
+
+```{r fig.align='center',fig.height=6,fig.width=8}
+melt(supplement_data[,9:15]) %>%
+  ggplot(aes(x=1,y=value))+
+  geom_boxplot(fill="dark blue")+
+  theme_minimal() +
+  theme(legend.position = "none")+
+  facet_wrap(variable~.,scales="free",ncol=4)
+```
+
+
+The boxplot shows that there are many extreme outliers in the variable `No of SARS-CoV-2 genes`.
+
+## Removing outliers
+
+```{r}
+## Outliers
+OutVals <- boxplot(supplement_data$`No of SARS-CoV-2 genes`)$out
+## removing outliers
+supplement_data$`No of SARS-CoV-2 genes` <- ifelse(
+  supplement_data$`No of SARS-CoV-2 genes` == OutVals, NA,
+  supplement_data$`No of SARS-CoV-2 genes`
+)
+## Outliers
+sum(is.na(supplement_data$`No of SARS-CoV-2 genes`))
+## Removing outliers
+supplement_data <- na.omit(supplement_data)
+```
+
+There are outliers in `2774` in `No of SARS-CoV-2 genes`, and these are removed.
+
+## Normalization of data
+
+Firstly, we will check the data normality by plotting the histogram.
+
+```{r fig.align='center',fig.height=6,fig.width=8}
+melt(supplement_data[,9:15]) %>%
+  ggplot(aes(x=value))+
+  geom_histogram(fill="dark blue")+
+  theme_minimal() +
+  theme(legend.position = "none")+
+  facet_wrap(variable~.,scales="free",ncol=4)
+```
+
+
+A total of 7 variables are numeric, and the ("IFNA Response", "IFNG Response", and "No of genes") are seems reasonably normal, as there is no evidence of skewness here. But the `No of SARS-CoV-2 genes`, `No of UMIs`,`% of mito genes`, and `% of ribo genes` are found as skewed, and there is need to convert them to normal. Skewness can be removed by taking the log of all these variables. The normality is given in the following chunks.
+
+```{r}
+## Taking log of variables
+supplement_data$`No of SARS-CoV-2 genes` <- log(supplement_data$`No of SARS-CoV-2 genes`)
+supplement_data$`No of UMIs` <- log(supplement_data$`No of UMIs`)
+supplement_data$`% of mito genes` <- log(supplement_data$`% of mito genes`)
+supplement_data$`% of ribo genes` <- log(supplement_data$`% of ribo genes`)
+## Plotting the histogram
+melt(supplement_data[,c(9,13:15)]) %>%
+  ggplot(aes(x=value))+
+  geom_histogram(fill="dark blue")+
+  theme_minimal() +
+  theme(legend.position = "none")+
+  facet_wrap(variable~.,scales="free",ncol=2)
+```
+
+
+It can be observed from these hitograms, that the variables now have approximately normal behavior.
+
+
+## Final coverage of data
+
+```{r}
+## Structure of data
+str(supplement_data)
+```
+
+After cleaning the data through missing values, duplicated values and remving outliers the final data left with 15 variable of 102,941 observations.
+
