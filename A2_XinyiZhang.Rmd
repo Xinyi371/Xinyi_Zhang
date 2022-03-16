@@ -1,0 +1,240 @@
+---
+title: "Assignment #2 DEG"
+author: "Xinyi Zhang"
+data: "02/13/2022"
+output: html_document
+---
+
+# load all packages
+
+```{r}
+if(!requireNamespace("org.Hs.eg.db",quietly = TRUE))
+  BiocManager::install("org.Hs.eg.db")
+if(!requireNamespace("clusterProfiler",quietly = TRUE))
+  BiocManager::install("clusterProfiler")
+if(!requireNamespace("biomaRt",quietly = TRUE))
+  BiocManager::install("biomaRt")
+if(!requireNamespace("tidyverse",quietly = TRUE))
+  install.packages("tidyverse")
+if(!requireNamespace("gplots",quietly = TRUE))
+  install.packages("gplots")
+if(!requireNamespace("RColorBrewer",quietly = TRUE))
+  install.packages("RColorBrewer")
+if(!requireNamespace("ggplot2",quietly = TRUE))
+  install.packages("ggplot2")
+if(!requireNamespace("edgeR",quietly = TRUE))
+  BiocManager::install("edgeR")
+if (!require(devtools)) install.packages("devtools")
+  devtools::install_github("yanlinlin82/ggvenn")
+
+
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(biomaRt)
+library(tidyverse)
+library(gplots)
+library(RColorBrewer)
+library(ggplot2)
+library(edgeR)
+library(ggvenn)
+```
+
+# load data from Assignment #1
+
+The normlized input matrix is from assignment 1. 
+
+edgeR was used to find the DEGs from our dataset. Since the dataset only contains two treatment groups, i.e., control vs. treatment. The design matrix is created to perfrom the comparison between control and treatment.
+
+```{r}
+
+load("as1.RData")
+normalized_counts<-normalized_counts[,c(4,5,6,1,2,3)]
+group<-rep(c('control','treat'),each=3)
+
+d <- DGEList(counts=normalized_counts,group=group)
+design<-model.matrix(~group)
+
+dge <- estimateDisp(d, design, robust = TRUE)
+
+fit <- glmQLFit(dge, design, robust = TRUE)
+lrt <- topTags(glmQLFTest(fit), n = nrow(d$counts))
+res<-data.frame(lrt)
+sigres<-res[res$FDR<0.05 & abs(res$logFC)>2,]
+```
+
+sigres contains the significant DEGs from our dataset. In total, 831 genes were identified as DEGs.
+
+# volcano plot of DEGs.
+
+Now, generatet the volcano plot for the DEGs. All DEGs are colored in the volcano plot.
+
+```{r}
+
+res$color<-"None"
+res$color[res$logFC >  2 & res$FDR<0.05]<-"up"
+res$color[res$logFC < -2 & res$FDR<0.05]<-"dn"
+ggplot(res,aes(x=logFC,y= -log10(FDR),color=color))+
+  geom_point()+
+  scale_color_manual(values = c('red', 'gray', 'green'), limits = c('up', 'None', 'dn'))+
+  labs(x = 'log2 Fold Change', y = '-log10 FDR', title = 'control vs treat', color = '')+theme(plot.title = element_text(hjust = 0.5, size = 14), panel.grid = element_blank(), 
+    panel.background = element_rect(color = 'black', fill = 'transparent'), 
+    legend.key = element_rect(fill = 'transparent')) +
+geom_vline(xintercept = c(-2, 2), lty = 3, color = 'black') +  
+geom_hline(yintercept = -log10(0.05), lty = 3, color = 'black') 
+```
+
+From the volcano plot, we can see that most DEGs have a logFC around 2 to 4. Only a handful genes have large logFC values. 
+
+# heatmap of DEGs
+
+Now, we generate the heatmap of DEGs. Normlized reads counts of DEGs were used to generate the heatmap.
+
+```{r}
+mat<-data.frame(normalized_counts)
+head(mat)
+mat$gene<-rownames(mat)
+sigres$gene<-rownames(sigres)
+
+mat<-merge(mat,sigres,by="gene",all=FALSE)
+rownames(mat)<-mat$gene
+colnames(mat)
+mat[,c(1,8,9,10,11,12)]<-NULL
+
+
+
+my_palette <- colorRampPalette(c("red", "yellow", "green"))(n = 100)
+col_breaks = c(seq(-1,0,length=100),  # for red
+  seq(0.01,0.8,length=100),           # for yellow
+  seq(0.81,1,length=100)) 
+heatmap.2(as.matrix(mat),  main = "DEG Heatmap", notecol="black",      
+  density.info="none",  trace="none", margins =c(6,6), scale="row",    
+  col=my_palette, dendrogram="both")   
+```
+
+From the heatmap, we can see that the samples of each group are perfectly clustered together. The difference between control group and treatment group is also very clear shown in the figure, as some genes have a low expression level in control samples but have high expression level in treatment samples. 
+
+#GSEA
+
+Now we do the GSEA analysis of the DEGs. Same procesure used for all DEGs, up-regulated DEGs, and down-regulated DEGs. Gene Ontology is used as genesets for GSEA analysis.
+
+
+```{r}
+sigall<-sigres
+sigall$Gene<-rownames(sigall)
+sigall<-sigall[,c(7,1)]
+genename <- as.character(sigall[,1])
+gene_map <- AnnotationDbi::select(org.Hs.eg.db, keys=genename, keytype="SYMBOL", columns=c("ENTREZID"))
+colnames(gene_map)[1]<-"Gene"
+sigall<-inner_join(gene_map,sigall,by = "Gene")
+sigall$Gene<-NULL
+sigall<-na.omit(sigall)
+sigall$logFC<-sort(sigall$logFC,decreasing = T)
+geneList = sigall[,2]
+names(geneList) = as.character(sigall[,1])
+
+Go_gseresult <- gseGO(geneList, 'org.Hs.eg.db', keyType = "ENTREZID", ont="all", nPerm = 1000, minGSSize = 10, maxGSSize = 1000, pvalueCutoff=1)
+
+GO_all<-data.frame(Go_gseresult)
+GO_all<-GO_all[GO_all$p.adjust<0.05,]
+head(GO_all)
+nrow(GO_all)
+```
+
+Repeat the process for up regulated genes and down regulated genes.
+
+```{r}
+sigall<-sigres[sigres$logFC > 0,]
+sigall$Gene<-rownames(sigall)
+sigall<-sigall[,c(7,1)]
+genename <- as.character(sigall[,1])
+gene_map <- AnnotationDbi::select(org.Hs.eg.db, keys=genename, keytype="SYMBOL", columns=c("ENTREZID"))
+colnames(gene_map)[1]<-"Gene"
+sigall<-inner_join(gene_map,sigall,by = "Gene")
+sigall$Gene<-NULL
+sigall<-na.omit(sigall)
+sigall$logFC<-sort(sigall$logFC,decreasing = T)
+geneList = sigall[,2]
+names(geneList) = as.character(sigall[,1])
+
+Go_gseresult <- gseGO(geneList, 'org.Hs.eg.db', keyType = "ENTREZID", ont="all", nPerm = 1000, minGSSize = 10, maxGSSize = 1000, pvalueCutoff=1)
+
+GO_up<-data.frame(Go_gseresult)
+GO_up<-GO_up[GO_up$p.adjust<0.05,]
+head(GO_up)
+nrow(GO_up)
+
+```
+
+
+```{r}
+sigall<-sigres[sigres$logFC < 0,]
+sigall$Gene<-rownames(sigall)
+sigall<-sigall[,c(7,1)]
+genename <- as.character(sigall[,1])
+gene_map <- AnnotationDbi::select(org.Hs.eg.db, keys=genename, keytype="SYMBOL", columns=c("ENTREZID"))
+colnames(gene_map)[1]<-"Gene"
+sigall<-inner_join(gene_map,sigall,by = "Gene")
+sigall$Gene<-NULL
+sigall<-na.omit(sigall)
+sigall$logFC<-sort(sigall$logFC,decreasing = T)
+geneList = sigall[,2]
+names(geneList) = as.character(sigall[,1])
+
+Go_gseresult <- gseGO(geneList, 'org.Hs.eg.db', keyType = "ENTREZID", ont="all", nPerm = 1000, minGSSize = 10, maxGSSize = 1000, pvalueCutoff=1)
+
+GO_dn<-data.frame(Go_gseresult)
+GO_dn<-GO_dn[GO_dn$p.adjust<0.05,]
+head(GO_dn)
+nrow(GO_dn)
+```
+```{r}
+set1<-GO_all$ID
+set2<-GO_up$ID
+set3<-GO_dn$ID
+
+ggvenn(
+  list(A=set1,B=set2,C=set3)
+  )
+
+
+```
+
+
+From the GSEA results, we can see different input genes will give different results. 
+
+
+# Q&A
+
+# DEGs
+1.	Calculate p-values for each of the genes in your expression set. How many genes were significantly differentially expressed? What thresholds did you use and why?
+We used edgeR to perform the differential expression gene analysis, in our result, there are 1008 DEGs in total. The thresholds were used are pvalue<0.05 and abs(logFC)>2. Pvalue is used to select statistically significant genes and logFC is used to genes with high expression changes. 
+
+2.	Multiple hypothesis testing - correct your p-values using a multiple hypothesis correction method. Which method did you use? And Why? How many genes passed correction?
+We used edgeR for finding DEGs, the correct p-values were calculated by the default method. i.e., Benjamini-Hochberg method. This method is a widely used method and has been used for many scientific publications. So we used this one in our data analysis. After applying this FDR < 0.05 cutoff, 831 genes were DEGs with 423 down-regulated genes and 408 up-regulated genes. 177 false positive genes were removed. 
+
+3.	Show the amount of differentially expressed genes using an MA Plot or a Volcano plot. Highlight genes of interest.
+We used volcano plot to show DEGs.
+
+4.	Visualize your top hits using a heatmap. Do you conditions cluster together? Explain why or why not.
+Samples are clustered togehter very well as shown in the heatmap. This is because the DEGs in different groups have different expression patterns. 
+
+# GSEA
+1.	Which method did you choose and why?
+We used gseGO function from clusterProfiler Bioconductor package was used to perform the GSEA. We choose this one is because this one is a very popular and esay-to-use one. 
+
+2.	What annotation data did you use and why? What version of the annotation are you using?
+We use GO to perform the GSEA. We use GO is because GO is very popular and used in many scientific publications. GO terms are from org.Hs.eg.db Bioconductor packages with version 3.14.
+
+3.	How many genesets were returned with what thresholds?
+The number of significant GO terms detected by different DEGs are listed above. FDR < 0.05 was used to selected significant GO terms.
+
+4.	Run the analysis using the up-regulated set of genes, and the down-regulated set of genes separately. How do these results compare to using the whole list (i.e all differentially expressed genes together vs. the up-regulated and down regulated differentially expressed genes separately)?
+When we use the down- or up- genes to run the GSEA, we can see the significant GO terms is different from the result from total genes. 
+
+# Reference
+1.	Wickham, H. (2016). ggplot2: elegant graphics for data analysis. springer.
+2.	Smedley, D., Haider, S., Ballester, B., Holland, R., London, D., Thorisson, G., & Kasprzyk, A. (2009). BioMart-biological queries made easy. BMC genomics, 10(1), 1-12.
+3.	Yu, G., Wang, L. G., Han, Y., & He, Q. Y. (2012). clusterProfiler: an R package for comparing biological themes among gene clusters. Omics: a journal of integrative biology, 16(5), 284-287.
+4.	Warnes, M. G. R., Bolker, B., Bonebakker, L., Gentleman, R., & Huber, W. (2016). Package 'gplots'. Various R programming tools for plotting data.
+
+
