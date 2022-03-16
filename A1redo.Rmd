@@ -1,0 +1,114 @@
+---
+title: "Assignment #1 Dataset selection and initial processing"
+author: "Xinyi Zhang"
+data: "02/13/2022"
+output: html_document
+---
+
+## R Markdown
+
+Download data, the data used for this assignment is from here: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE150392
+The GEOquery library is used for downloading the corresponding count matrix.
+Becaues the getGEOSuppFiles function will create a folder and save the count matrix into the folder, here we used a if..else.. to check if the data exists to avoid download the data everytime.
+```{r}
+library(GEOquery)
+if (!dir.exists('GSE150392')){
+  supfiles = getGEOSuppFiles('GSE150392')
+} else {
+  print("Dir already exists and data already downloaded!")
+}
+
+```
+
+Check how many Supplementary files are included for this study. Then, download the supplementary data (i.e., the count matrix) to local computer.
+
+```{r}
+nrow(supfiles)
+supfiles = rownames(supfiles)
+mat = read.delim(supfiles[1],header=TRUE)
+```
+
+Preprocess the matrix data and convert it to a matrix/dataFrame. From the GEO webpage, we can know that this study contains three replicates for each treatment group, so the matirx should have 7 columns (1st col is the gene symbol). The column names can be changed based on the original column names.
+
+```{r}
+library(stringr)
+mat<-data.frame(str_split_fixed(mat$X.Cov1.Cov2.Cov3.Mock1.Mock2.Mock3, ",", 7))
+head(mat)
+colnames(mat)<-c("Symbol","Cov1","Cov2","Cov3","Mock1","Mock2","Mock3")
+symbol<-mat[,1]
+mat<-data.frame(apply(mat[,c(2:7)], 2, function(x) as.numeric(as.character(x))))
+mat$symbol<-symbol
+mat<-mat[,c(7,1,2,3,4,5,6)]
+head(mat)
+```
+
+From the gene symbol in the matrix, we can see these symbols contain ensemble gene ID and gene symbol, it is better to use two columns to hold these info.
+
+```{r}
+symbol<-data.frame(str_split_fixed(mat[,1],"_",2))
+colnames(symbol)<-c("GeneID","GeneSymbol")
+
+mat<-cbind(symbol,mat)
+mat$symbol<-NULL
+```
+
+Now, we check the overall quailty of the data.
+
+```{r}
+dim(mat)
+```
+
+This data contains 36941 genes with 3 replicates for each treatment group. Now we want to see if any genes are duplicated in this data.
+
+```{r}
+symbolcount<-data.frame(table(mat$GeneSymbol))
+hist(symbolcount$Freq)
+IDcount<-data.frame(table(mat$GeneID))
+hist(IDcount$Freq)
+```
+
+From these results, we can see there is not duplicated genes in this dataset.
+Now we try to map the gene symbol to HUGO gene symbol. HGNChelper package is used for this.
+
+```{r}
+library(HGNChelper)
+hugocheck<-checkGeneSymbols(mat$GeneSymbol,species = "human")
+colnames(hugocheck)[1]<-c("GeneSymbol")
+mat<-merge(mat,hugocheck,by="GeneSymbol",all=FALSE)
+mat<-mat[mat$Approved == "TRUE",]
+mat$GeneSymbol<-NULL
+mat$GeneID<-NULL
+mat$Approved<-NULL
+mat<-mat[,c(7,1,2,3,4,5,6)]
+colnames(mat)[1]<-"Symbol"
+```
+
+A reasonable replicate filter for here is at least have reads counts in two replicates. Any rows contains more than 3 zeros will be removed. Rows with same symbol will be averaged to keep only one record. 
+
+```{r}
+mat<-mat[rowSums(mat == 0) < 2, ]
+mat<-unique(mat)
+symbolcount<-data.frame(table(mat$Symbol))
+genewithmuiltiplerow<-symbolcount[symbolcount$Freq != 1,]
+tp<-mat[mat$Symbol %in% genewithmuiltiplerow$Var1,]
+tp<-aggregate(cbind(Cov1,Cov2,Cov3,Mock1,Mock2,Mock3) ~ Symbol, data = tp, FUN = mean, na.rm = TRUE)
+genekeep<-symbolcount[symbolcount$Freq == 1,]
+mat<-mat[mat$Symbol %in% genekeep$Var1,]
+mat<-rbind(mat,tp)
+```
+
+Now, we can normlize our data. The normalized_counts is the final data frame.
+
+```{r}
+library(edgeR)
+rownames(mat)<-mat$Symbol
+matx<-mat[,c(2:7)]
+data2plot <- log2(cpm(matx))
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM",las = 2, cex = 0.5, cex.lab = 0.5,cex.axis = 0.5, main = "CA125 RNASeq Samples")
+abline(h = median(apply(data2plot, 2, median)),col = "green", lwd = 0.6, lty = "dashed")
+
+d = DGEList(counts=matx)
+d =calcNormFactors(d)
+normalized_counts <- cpm(d)
+```
+
